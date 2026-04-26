@@ -1,0 +1,10 @@
+# dataset
+household_power_consumption.txt
+dataset.txt
+
+# ML models
+*.pkl
+*.h5
+*.pt
+*.joblib
+model/

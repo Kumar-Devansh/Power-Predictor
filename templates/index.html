@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PowerPredict - Household Electricity Analytics</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- html2pdf for Save as PDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+</head>
+<body>
+    <canvas id="particle-canvas"></canvas>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo">⚡ PowerPredict</div>
+            <p>Household Electricity Consumption & Price Prediction</p>
+        </header>
+
+        <main class="grid-layout">
+            <!-- Left Panel: Input form -->
+            <section class="panel input-panel">
+                <h2 class="panel-title">Appliance Usage Input</h2>
+                
+                <form id="electricity-form">
+                    <!-- Default Appliances -->
+                    <div id="appliances-container">
+                        <!-- Filled by JS -->
+                    </div>
+                    
+                    <button type="button" id="add-appliance-btn" class="btn btn-secondary">+ Add Custom Appliance</button>
+                    
+                    <div class="form-group price-group">
+                        <label for="pricePerUnit">Electricity Price (₹ per kWh): <span id="priceVal">5.0</span></label>
+                        <input type="range" id="pricePerUnit" min="1" max="20" step="0.5" value="5">
+                    </div>
+
+                    <div class="form-group options-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="peakHourMultiplier"> Apply Peak-Hour Pricing Multiplier (+15%)
+                        </label>
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary" id="calculate-btn">Calculate & Predict Results</button>
+                </form>
+            </section>
+
+            <!-- Right Panel: Results & Chart -->
+            <section class="panel results-panel" id="results-panel" style="display: none;">
+                <div class="results-header">
+                    <h2 class="panel-title">Prediction Report</h2>
+                    <button type="button" id="save-pdf-btn" class="btn btn-outline" title="Save Report as PDF">📄 Save PDF</button>
+                </div>
+                
+                <div class="kpi-grid">
+                    <div class="kpi-card">
+                        <span class="kpi-label">Deterministic Cons.</span>
+                        <div class="kpi-value"><span id="lbl-det-kwh">0</span> <small>kWh</small></div>
+                    </div>
+                    <div class="kpi-card highlight">
+                        <span class="kpi-label">ML Predicted Cons.</span>
+                        <div class="kpi-value"><span id="lbl-ml-kwh">0</span> <small>kWh</small></div>
+                    </div>
+                    <div class="kpi-card primary">
+                        <span class="kpi-label">Est. Total Cost</span>
+                        <div class="kpi-value">₹<span id="lbl-cost">0</span></div>
+                    </div>
+                </div>
+                
+                <div class="chart-container">
+                    <canvas id="consumptionChart"></canvas>
+                </div>
+                
+                <div class="breakdown-list">
+                    <h3>Appliance Breakdown</h3>
+                    <ul id="breakdown-ul"></ul>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Application Logic -->
+    <script>
+        const defaultAppliances = [
+            { id: "fan", name: "Fan", watt: 75, hours: 8, maxHours: 24 },
+            { id: "ac", name: "Air Conditioner", watt: 1500, hours: 4, maxHours: 24 },
+            { id: "fridge", name: "Refrigerator", watt: 200, hours: 24, maxHours: 24 },
+            { id: "wm", name: "Washing Machine", watt: 500, hours: 1, maxHours: 24 },
+            { id: "tv", name: "TV", watt: 150, hours: 4, maxHours: 24 },
+            { id: "lights", name: "Lights", watt: 60, hours: 6, maxHours: 24 }
+        ];
+
+        const container = document.getElementById("appliances-container");
+        let customCount = 0;
+
+        function createApplianceHTML(app) {
+            return `
+                <div class="appliance-card" id="card-${app.id}">
+                    <div class="appliance-info">
+                        <div class="app-name">
+                            <input type="text" value="${app.name}" class="editable-name" data-id="${app.id}" ${app.id.startsWith('custom') ? '' : 'readonly'}>
+                        </div>
+                        <div class="app-watt">
+                            <input type="number" value="${app.watt}" data-id="${app.id}" class="watt-input"> W
+                        </div>
+                    </div>
+                    <div class="appliance-slider">
+                        <label>Hours/Day: <span id="val-${app.id}">${app.hours}</span>h</label>
+                        <input type="range" class="hour-slider" data-id="${app.id}" min="0" max="${app.maxHours || 24}" step="0.5" value="${app.hours}" oninput="document.getElementById('val-${app.id}').innerText=this.value">
+                    </div>
+                </div>
+            `;
+        }
+
+        // Initialize defaults
+        defaultAppliances.forEach(app => {
+            container.innerHTML += createApplianceHTML(app);
+        });
+
+        // Add custom
+        document.getElementById("add-appliance-btn").addEventListener("click", () => {
+            customCount++;
+            const newApp = { id: `custom-${customCount}`, name: `Custom ${customCount}`, watt: 100, hours: 2, maxHours: 24 };
+            container.insertAdjacentHTML('beforeend', createApplianceHTML(newApp));
+        });
+
+        // Price slider UI
+        document.getElementById("pricePerUnit").addEventListener("input", function() {
+            document.getElementById("priceVal").innerText = parseFloat(this.value).toFixed(2);
+        });
+
+        let myChart = null;
+
+        document.getElementById("electricity-form").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            
+            const btn = document.getElementById("calculate-btn");
+            btn.innerText = "Calculating...";
+            btn.disabled = true;
+
+            try {
+                // Gather data
+                const appCards = document.querySelectorAll(".appliance-card");
+                const appliancesData = [];
+                
+                appCards.forEach(card => {
+                    const id = card.querySelector(".hour-slider").dataset.id;
+                    const name = card.querySelector(".editable-name").value;
+                    const watt = card.querySelector(".watt-input").value;
+                    const hours = card.querySelector(".hour-slider").value;
+                    
+                    appliancesData.push({ id, name, watt: parseFloat(watt), hours: parseFloat(hours) });
+                });
+
+                const price = parseFloat(document.getElementById("pricePerUnit").value);
+                const isPeak = document.getElementById("peakHourMultiplier").checked;
+
+                const response = await fetch("/predict", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ appliances: appliancesData, price_per_unit: price })
+                });
+                
+                const result = await response.json();
+                
+                if(result.success) {
+                    let finalCost = result.estimated_cost;
+                    if(isPeak) finalCost *= 1.15; // +15% peak multiplier
+                    
+                    document.getElementById("lbl-det-kwh").innerText = result.deterministic_consumption_kwh;
+                    document.getElementById("lbl-ml-kwh").innerText = result.predicted_consumption_kwh;
+                    document.getElementById("lbl-cost").innerText = finalCost.toFixed(2);
+                    
+                    // Show breakdown
+                    const ul = document.getElementById("breakdown-ul");
+                    ul.innerHTML = "";
+                    
+                    const labels = [];
+                    const data = [];
+                    const colors = [];
+                    
+                    const colorPalette = ['#fbcfe8', '#f9a8d4', '#f472b6', '#ec4899', '#db2777', '#be185d', '#9d174d', '#831843'];
+
+                    result.breakdown.forEach((b, i) => {
+                        ul.innerHTML += `<li><span>${b.name}</span> <span class="badge">${b.consumption.toFixed(2)} kWh</span></li>`;
+                        labels.push(b.name);
+                        data.push(b.consumption);
+                        colors.push(colorPalette[i % colorPalette.length]);
+                    });
+
+                    // Render Chart
+                    document.getElementById("results-panel").style.display = "block";
+                    const ctx = document.getElementById('consumptionChart').getContext('2d');
+                    
+                    if(myChart) myChart.destroy();
+                    
+                    myChart = new Chart(ctx, {
+                        type: 'bar',
+                        data: {
+                            labels: labels,
+                            datasets: [{
+                                label: 'Daily Consumption (kWh)',
+                                data: data,
+                                backgroundColor: '#ec4899', // pink-500
+                                hoverBackgroundColor: '#db2777', // pink-600
+                                borderRadius: 8
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: false }
+                            },
+                            scales: {
+                                y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' } },
+                                x: { grid: { display: false } }
+                            }
+                        }
+                    });
+                    
+                    // Scroll to results on mobile
+                    if(window.innerWidth < 768) {
+                        document.getElementById("results-panel").scrollIntoView({behavior: 'smooth'});
+                    }
+                } else {
+                    alert("Error in prediction: " + result.error);
+                }
+            } catch(e) {
+                console.error(e);
+                alert("Network error occurred.");
+            } finally {
+                btn.innerText = "Calculate & Predict Results";
+                btn.disabled = false;
+            }
+        });
+
+        // PDF generator
+        document.getElementById("save-pdf-btn").addEventListener("click", () => {
+            const element = document.getElementById('results-panel');
+            const opt = {
+              margin:       0.5,
+              filename:     'Energy_Report.pdf',
+              image:        { type: 'jpeg', quality: 0.98 },
+              html2canvas:  { scale: 2 },
+              jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' }
+            };
+            html2pdf().set(opt).from(element).save();
+        });
+
+        // --- Particle System ---
+        const canvas = document.getElementById("particle-canvas");
+        const ctx = canvas.getContext("2d");
+        
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        let particlesArray = [];
+        const mouse = {
+            x: null,
+            y: null,
+            radius: 120
+        };
+
+        window.addEventListener('mousemove', function(event) {
+            mouse.x = event.x;
+            mouse.y = event.y;
+        });
+        
+        window.addEventListener('mouseout', function() {
+            mouse.x = null;
+            mouse.y = null;
+        });
+
+        window.addEventListener('resize', function() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            initParticles();
+        });
+
+        class Particle {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.size = Math.random() * 3 + 1;
+                this.color = ['#ec4899', '#fbcfe8', '#be185d'][Math.floor(Math.random() * 3)];
+                this.weight = Math.random() * 1.5 + 0.5;
+                this.directionX = -1.5 + Math.random() * 3;
+                this.directionY = -1.5 + Math.random() * 3;
+            }
+
+            update() {
+                if(mouse.x != null) {
+                    let dx = mouse.x - this.x;
+                    let dy = mouse.y - this.y;
+                    let distance = Math.sqrt(dx * dx + dy * dy);
+                    if(distance < mouse.radius) {
+                        const forceDirectionX = dx / distance;
+                        const forceDirectionY = dy / distance;
+                        const force = (mouse.radius - distance) / mouse.radius;
+                        const directionX = forceDirectionX * force * this.weight * 1.5;
+                        const directionY = forceDirectionY * force * this.weight * 1.5;
+                        
+                        this.x += directionX;
+                        this.y += directionY;
+                    }
+                }
+                
+                this.x += this.directionX;
+                this.y += this.directionY;
+
+                if (this.x < 0 || this.x > canvas.width) this.directionX = -this.directionX;
+                if (this.y < 0 || this.y > canvas.height) this.directionY = -this.directionY;
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+            }
+        }
+
+        function initParticles() {
+            particlesArray = [];
+            let numberOfParticles = Math.floor((canvas.height * canvas.width) / 12000);
+            if (numberOfParticles > 150) numberOfParticles = 150; // cap for performance
+            for (let i = 0; i < numberOfParticles; i++) {
+                let x = Math.random() * canvas.width;
+                let y = Math.random() * canvas.height;
+                particlesArray.push(new Particle(x, y));
+            }
+        }
+
+        function animateParticles() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            for (let i = 0; i < particlesArray.length; i++) {
+                particlesArray[i].update();
+                particlesArray[i].draw();
+            }
+            connectParticles();
+            requestAnimationFrame(animateParticles);
+        }
+
+        function connectParticles() {
+            for (let a = 0; a < particlesArray.length; a++) {
+                for (let b = a + 1; b < particlesArray.length; b++) {
+                    let distance = ((particlesArray[a].x - particlesArray[b].x) * (particlesArray[a].x - particlesArray[b].x))
+                                 + ((particlesArray[a].y - particlesArray[b].y) * (particlesArray[a].y - particlesArray[b].y));
+                    if (distance < 8000) {
+                        let opacityValue = 1 - (distance / 8000);
+                        let hexToRgb;
+                        if(particlesArray[a].color === '#ec4899') hexToRgb = '236, 72, 153';
+                        else if(particlesArray[a].color === '#fbcfe8') hexToRgb = '251, 207, 232';
+                        else hexToRgb = '190, 24, 93';
+                        ctx.strokeStyle = `rgba(${hexToRgb}, ${opacityValue * 0.4})`;
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(particlesArray[a].x, particlesArray[a].y);
+                        ctx.lineTo(particlesArray[b].x, particlesArray[b].y);
+                        ctx.stroke();
+                    }
+                }
+                
+                if (mouse.x != null && mouse.y != null) {
+                    let mouseDist = ((particlesArray[a].x - mouse.x) * (particlesArray[a].x - mouse.x))
+                                 + ((particlesArray[a].y - mouse.y) * (particlesArray[a].y - mouse.y));
+                    if (mouseDist < 12000) {
+                        let opacityValue = 1 - (mouseDist / 12000);
+                        let hexToRgb;
+                        if(particlesArray[a].color === '#ec4899') hexToRgb = '236, 72, 153';
+                        else if(particlesArray[a].color === '#fbcfe8') hexToRgb = '251, 207, 232';
+                        else hexToRgb = '190, 24, 93';
+                        ctx.strokeStyle = `rgba(${hexToRgb}, ${opacityValue * 0.6})`;
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(particlesArray[a].x, particlesArray[a].y);
+                        ctx.lineTo(mouse.x, mouse.y);
+                        ctx.stroke();
+                    }
+                }
+            }
+        }
+
+        initParticles();
+        animateParticles();
+    </script>
+</body>
+</html>
