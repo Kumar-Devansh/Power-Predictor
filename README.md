@@ -109,6 +109,8 @@ Flask
 numpy
 scikit-learn
 xgboost
+pandas
+joblib
 ```
 
 Save and exit:
