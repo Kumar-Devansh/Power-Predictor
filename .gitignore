@@ -8,3 +8,9 @@ dataset.txt
 *.pt
 *.joblib
 model/
+
+
+venv/
+__pycache__/
+*.pyc
+.env
